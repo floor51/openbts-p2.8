@@ -381,6 +381,75 @@ int sendsms(int argc, char** argv, ostream& os)
 	return SUCCESS;
 }
 
+/** Submit a sample SIM OTA msg to a Gemalto dev SIM to set operator string for delivery to an IMSI. */
+int sendsimsms(int argc, char** argv, ostream& os)
+{
+    if (argc<2) return BAD_NUM_ARGS;
+
+    char *IMSI = argv[1];
+    char *srcAddr = argv[2];
+
+    // SELECT 7FFF/6F46, UPDATE BINARY using Gemalto dev KiC+KiD
+    char simMsg[] {
+          2,112,0,  // UDH header, IEI 0x70
+          0,64,21,14,1,37,37,176,0,16,74,201,249,242,99,107,228,41,43,118,203,102,218,74,191,89,97,231,158,182,129,115,113,209,46,46,241,58,132,96,60,94,162,81,49,152,171,101,145,187,222,165,224,158,39,238,114,234,214,117,122,168,154,41,22,119
+    };
+
+    if (!isIMSI(IMSI)) {
+        os << "Invalid IMSI. Enter 15 digits only.";
+        return BAD_VALUE;
+    }
+
+    unsigned TLPID = 0x7f;
+    unsigned TLDCS = 0xf6;
+
+    // Generate RP-DATA with SMS-DELIVER
+    unsigned reference = random() % 255;
+    BitVector* rawData = new BitVector(sizeof(simMsg) * 8);
+    size_t writeCursor = size_t(0);
+    for(int i=0; i<sizeof(simMsg);i++) {
+      rawData->writeFieldReversed(writeCursor, (uint64_t)simMsg[i], (unsigned int)8);
+    }
+
+    LOG(INFO) << "BitV len: " << sizeof(simMsg);
+
+    TLUserData tlud = TLUserData(TLDCS, *rawData, sizeof(simMsg), true);
+
+    TLDeliver deliver(TLAddress(GSM::NationalNumber, GSM::E164Plan, srcAddr), tlud, TLPID);
+
+    RPAddress smsc = RPAddress("0000");
+    smsc.setType(GSM::NationalNumber);
+    smsc.setPlan(GSM::E164Plan);
+
+    RPData rp_data(reference, smsc, deliver);
+    LOG(INFO) << "New RPData: " << rp_data;
+
+    // Pack RP-DATA to bitstream
+    RLFrame RPDU_new(SM_RL_DATA_REQ, rp_data.bitsNeeded());
+    rp_data.write(RPDU_new);
+    LOG(INFO) << "New RLFrame: " << RPDU_new;
+
+    // Get hex string of the packed data
+    ostringstream body_stream;
+    RPDU_new.hex(body_stream);
+
+    Control::TransactionEntry *transaction = new Control::TransactionEntry(
+            gConfig.getStr("SIP.Proxy.SMS").c_str(),
+            GSM::L3MobileIdentity(IMSI),
+            NULL,
+            GSM::L3CMServiceType::MobileTerminatedShortMessage,
+            GSM::L3CallingPartyBCDNumber(srcAddr),
+            GSM::Paging,
+            body_stream.str().data());
+    
+    transaction->messageType("application/vnd.3gpp.sms");
+
+    Control::initiateMTTransaction(transaction,GSM::SDCCHType,30000);
+
+    os << "message submitted for delivery" << endl;
+    return SUCCESS;
+}
+
 
 /** Print current usage loads. */
 int printStats(int argc, char** argv, ostream& os)
@@ -1317,6 +1386,7 @@ void Parser::addCommands()
 	addCommand("shutdown", exit_function, "[wait] -- shut down or restart OpenBTS, either immediately, or waiting for existing calls to clear with a timeout in seconds");
 	addCommand("tmsis", tmsis, "[\"clear\"] or [\"dump\" filename] -- print/clear the TMSI table or dump it to a file.");
 	addCommand("sendsms", sendsms, "IMSI src# message... -- send direct SMS to IMSI, addressed from source number src#.");
+	addCommand("sendsimsms", sendsimsms, "IMSI src# -- send sample SIM OTA SMS to Gemalto IMSI, addressed from source number src#.");
 	addCommand("sendsimple", sendsimple, "IMSI src# message... -- send SMS to IMSI via SIP interface, addressed from source number src#.");
 	addCommand("load", printStats, "-- print the current activity loads.");
 	addCommand("cellid", cellID, "[MCC MNC LAC CI] -- get/set location area identity (MCC, MNC, LAC) and cell ID (CI)");
